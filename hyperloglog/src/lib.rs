@@ -3,6 +3,8 @@ extern crate rand;
 use rand::Rng;
 use std::error::Error;
 use std::hash::{Hash, Hasher};
+use std::fmt;
+use std::collections::BTreeMap;
 
 #[allow(deprecated)]
 use std::hash::SipHasher;
@@ -79,6 +81,78 @@ impl HyperLogLog {
     pub fn cardinality(&self) -> f64 {
         estimate_cardinality(self).0
     }
+
+    pub fn typical_error_rate(&self) -> f64 {
+        1.04 / (self.m as f64).sqrt()
+    }
+
+    pub fn histgram_of_register_value_distribution(&self) -> String {
+        let mut histgram = Vec::new();
+
+        let mut map = BTreeMap::new();
+        for x in &self.registers {
+            let count = map.entry(*x).or_insert(0);
+            *count += 1;
+        }
+
+        if let (Some(last_reg_value), Some(max_count)) = (map.keys().last(), map.values().max()) {
+            let width = 40.0;
+            let rate = width / (*max_count as f64);
+
+            for i in 0..(last_reg_value + 1) {
+                let mut line = format!("{:3}: ", i);
+
+                if let Some(count) = map.get(&i) {
+                    let h_bar = std::iter::repeat("*")
+                        .take((*count as f64 * rate).ceil() as usize)
+                        .collect::<String>();
+                    line.push_str(&h_bar);
+                    line.push_str(&format!(" {}", count));
+                } else {
+                    line.push_str("0");
+                };
+
+                histgram.push(line);
+            }
+        }
+        histgram.join("\n")
+    }
+
+    pub fn from_template(template: &HyperLogLog) -> Self {
+        let m = template.m;
+        HyperLogLog {
+            b: template.b,
+            b_mask: m - 1,
+            m: m,
+            alpha: template.alpha,
+            registers: vec![0; m],
+            hasher_key0: template.hasher_key0,
+            hasher_key1: template.hasher_key1,
+        }
+    }
+
+    pub fn merge(&mut self, other: &HyperLogLog) -> Result<(), Box<Error>> {
+        if self.b == other.b && self.m == other.m && self.hasher_key0 == other.hasher_key0 && self.hasher_key1 == other.hasher_key1 {
+            for (p1, p2) in self.registers.iter_mut().zip(other.registers.iter()) {
+                if *p1 < *p2 {
+                    *p1 = *p2
+                }
+            }
+            Ok(())
+        } else {
+            Err(From::from(format!("Specs does not match.\
+            b: {}|{}, m: {}|{}, hasher: ({},{})|({},{})",
+                                   self.b,
+                                   other.b,
+                                   self.m,
+                                   other.m,
+                                   self.hasher_key0,
+                                   self.hasher_key1,
+                                   other.hasher_key0,
+                                   other.hasher_key1,
+            )))
+        }
+    }
 }
 
 fn get_alpha(b: u8) -> Result<f64, Box<Error>> {
@@ -133,6 +207,29 @@ fn raw_hyperloglog_estimate(alpha: f64, m: f64, registers: &[u8]) -> f64 {
 
 fn linear_counting_estimate(m: f64, number_of_zero_registers: f64) -> f64 {
     m * (m / number_of_zero_registers).ln()
+}
+
+impl fmt::Debug for HyperLogLog {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let (est, est_method) = estimate_cardinality(self);
+        write!(f,
+               r#"HyperLogLog
+estimated cardinality: {}
+estimation method:     {:?}
+--------------------------------------------------------
+b:     {} bits (typical error rate: {}%)
+m:     {} registers
+alpha: {}
+hasher: ({}, {})"#,
+               est,
+               est_method,
+               self.b,
+               self.typical_error_rate() * 100.0,
+               self.m,
+               self.alpha,
+               self.hasher_key0,
+               self.hasher_key1)
+    }
 }
 
 
